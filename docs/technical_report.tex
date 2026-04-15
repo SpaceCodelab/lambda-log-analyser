@@ -1,0 +1,539 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{geometry}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+\usepackage{titlesec}
+\usepackage{etoolbox}
+
+\geometry{margin=1in}
+
+% Colors
+\definecolor{primary}{RGB}{26, 26, 46}
+\definecolor{secondary}{RGB}{22, 33, 62}
+\definecolor{accent}{RGB}{78, 205, 196}
+\definecolor{light}{RGB}{248, 249, 250}
+\definecolor{warning}{RGB}{255, 107, 107}
+
+% Header/Footer
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\thepage}
+\lhead{\textbf{Lambda Log Analyser - Technical Documentation}}
+\cfoot{\thepage}
+
+% Section styling
+\titleformat{\section}{\Large\bfseries\color{primary}}{}{0em}{}
+\titleformat{\subsection}{\large\bfseries\color{secondary}}{}{0em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries\color{secondary}}{}{0em}{}
+
+\begin{document}
+
+% Title Page
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+    
+    {\Huge\bfseries\color{primary} Lambda Log Analyser\par}
+    \vspace{0.5cm}
+    {\LARGE\color{secondary} Technical Documentation\par}
+    \vspace{2cm}
+    
+    {\Large\bfseries Architecture, Features \& Process Pipeline\par}
+    \vspace{1cm}
+    
+    \rule{0.8\textwidth}{0.5pt}
+    
+    \vspace{2cm}
+    {\large Version 1.0\par}
+    \vspace{1cm}
+    {\large\ today\par}
+    
+    \vfill
+    {\itshape\color{gray} A comprehensive technical guide to building, deploying, and using the Lambda Log Analyser dashboard.\par}
+\end{titlepage}
+
+\pagebreak
+\tableofcontents
+\pagebreak
+
+% ==============================================================================
+% SECTION 1: EXECUTIVE SUMMARY
+% ==============================================================================
+\section{Executive Summary}
+
+The Lambda Log Analyser is a sophisticated dashboard application designed to analyze AWS Lambda function logs, extract meaningful performance metrics, detect errors, and provide actionable insights through an intuitive web interface.
+
+\bigskip
+\noindent\textbf{Key Capabilities:}
+\begin{itemize}
+    \item Real-time CloudWatch Logs fetching with automatic pagination
+    \item Comprehensive error detection and classification
+    \item Performance metrics extraction (duration, memory, cold starts)
+    \item Cost estimation based on AWS Lambda pricing model
+    \item Health score calculation for function monitoring
+    \item Interactive visualizations with Plotly charts
+    \item PDF and CSV export capabilities
+\end{itemize}
+
+% ==============================================================================
+% SECTION 2: SYSTEM ARCHITECTURE
+% ==============================================================================
+\section{System Architecture}
+
+\subsection{High-Level Architecture}
+
+\begin{figure}[htbp]
+    \centering
+    \begin{verbatim}
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                        USER INTERFACE                            │
+    │                   (Streamlit Web Dashboard)                      │
+    │                                                                 │
+    │  ┌─────────────┐  ┌──────────────┐  ┌────────────────────────┐ │
+    │  │ AWS Config  │  │ Log Groups   │  │ Analysis Controls      │ │
+    │  └─────────────┘  └──────────────┘  └────────────────────────┘ │
+    └─────────────────────────────────────────────────────────────────┘
+                                   │
+                                   ▼
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                      APPLICATION LAYER                          │
+    │                                                                 │
+    │  ┌────────────────┐  ┌────────────────┐  ┌──────────────────┐  │
+    │  │ LogFetcher     │  │ LogParser      │  │ AnalysisEngine   │  │
+    │  │ (boto3)       │  │ (Regex-based)  │  │ (Metrics Calc)   │  │
+    │  └────────────────┘  └────────────────┘  └──────────────────┘  │
+    │                                                                 │
+    │  ┌────────────────┐  ┌────────────────┐  ┌──────────────────┐  │
+    │  │ ChartGenerator │  │ PDFExporter    │  │ CSVExporter      │  │
+    │  │ (Plotly)      │  │ (ReportLab)    │  │ (Pandas)         │  │
+    │  └────────────────┘  └────────────────┘  └──────────────────┘  │
+    └─────────────────────────────────────────────────────────────────┘
+                                   │
+                                   ▼
+    ┌─────────────────────────────────────────────────────────────────┐
+    │                    AWS CLOUD SERVICES                           │
+    │                                                                 │
+    │  ┌────────────────────────────────────────────────────────┐    │
+    │  │              Amazon CloudWatch Logs                    │    │
+    │  │         (Log Groups, Log Streams, Events)               │    │
+    │  └────────────────────────────────────────────────────────┘    │
+    └─────────────────────────────────────────────────────────────────┘
+    \end{verbatim}
+    \caption{System Architecture Diagram}
+\end{figure}
+
+\subsection{Component Architecture}
+
+\subsubsection{Streamlit Dashboard (app.py)}
+The Streamlit application serves as the user interface layer, handling:
+\begin{itemize}
+    \item User authentication input (AWS credentials)
+    \item Configuration management (region, log groups, lookback period)
+    \item Session state management for analysis results
+    \item Tabbed interface for different analysis views
+    \item Real-time chart rendering with Plotly
+    \item Export functionality (PDF, CSV, JSON)
+\end{itemize}
+
+\subsubsection{Log Fetcher (log\_fetcher.py)}
+Responsible for CloudWatch Logs interaction:
+\begin{itemize}
+    \item AWS boto3 client initialization with configurable region
+    \item Automatic pagination handling for large log streams
+    \item Time-window filtering for lookback period
+    \item Multi-log-group support
+    \item Error handling for AWS API failures
+\end{itemize}
+
+\subsubsection{Log Parser (log\_parser.py)}
+Core parsing engine using regex patterns:
+\begin{itemize}
+    \item REPORT line parsing for performance metrics
+    \item START/END event detection
+    \item Error pattern matching (multiple regex patterns)
+    \item Cold start detection via Init Duration field
+    \item Exception type extraction
+\end{itemize}
+
+\pagebreak
+
+% ==============================================================================
+% SECTION 3: DATA FLOW PIPELINE
+% ==============================================================================
+\section{Data Flow Pipeline}
+
+\subsection{Pipeline Overview}
+
+\begin{figure}[htbp]
+    \centering
+    \begin{verbatim}
+    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+    │  User Input  │───▶│ Log Fetcher  │───▶│  Log Parser  │───▶│  Analysis    │
+    │  (Config)    │    │  (boto3)     │    │  (Regex)     │    │  Summary     │
+    └──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘
+                                                              │
+                         ┌────────────────────────────────────┘
+                         │
+                         ▼
+    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
+    │  PDF Report  │◀───│  Visualize   │◀───│  Metrics     │
+    │  Generator   │    │  (Charts)    │    │  Calculator  │
+    └──────────────┘    └──────────────┘    └──────────────┘
+    \end{verbatim}
+    \caption{Data Processing Pipeline}
+\end{figure}
+
+\subsection{Step-by-Step Process}
+
+\subsubsection{Step 1: Configuration}
+User provides AWS credentials and configuration:
+\begin{itemize}
+    \item AWS Access Key ID and Secret Access Key
+    \item AWS Region selection
+    \item CloudWatch Log Group names (one per line)
+    \item Lookback period in minutes
+    \item Lambda memory size and timeout for cost estimation
+\end{itemize}
+
+\subsubsection{Step 2: Log Fetching}
+The LogFetcher class performs:
+\begin{enumerate}
+    \item Initializes boto3 CloudWatch Logs client with provided credentials
+    \item For each log group, lists active log streams
+    \item Filters streams by last event timestamp (lookback window)
+    \item Fetches events from each stream with pagination
+    \item Yields raw event dictionaries with structure:
+\end{enumerate}
+
+\begin{lstlisting}[language=Python, caption=Raw Event Structure]
+{
+    "log_group": "/aws/lambda/function-name",
+    "log_stream": "2024/01/01/[$LATEST]abc123",
+    "timestamp": 1704067200000,  # Epoch milliseconds
+    "message": "REPORT RequestId: abc-123 Duration: 312.45 ms ..."
+}
+\end{lstlisting}
+
+\subsubsection{Step 3: Log Parsing}
+The LogParser processes each raw event:
+
+\bigskip
+\noindent\textbf{REPORT Event Parsing:}
+\begin{itemize}
+    \item Regex pattern extracts: RequestId, Duration, Billed Duration, Memory Size, Max Memory Used, Init Duration
+    \item Cold start detection: \texttt{is\_cold\_start = init\_duration is not None}
+    \item Creates ParsedEvent with all extracted metrics
+\end{itemize}
+
+\bigskip
+\noindent\textbf{Error Detection Patterns:}
+\begin{itemize}
+    \item \texttt{[ERROR]} or \texttt{ERROR:} in message
+    \item Python Traceback blocks
+    \item Exception types (ValueError, TypeError, etc.)
+    \item Timeout messages
+    \item Runtime errors (ExitError, OutOfMemoryError)
+\end{itemize}
+
+\subsubsection{Step 4: Analysis Summary}
+The build\_summary() method aggregates:
+\begin{itemize}
+    \item Total invocations and errors
+    \item Cold start count and rate
+    \item Duration statistics (min, max, avg, P95, P99)
+    \item Memory statistics (min, max, avg, efficiency)
+    \item Billed duration for cost calculation
+    \item Error events list with full messages
+\end{itemize}
+
+\pagebreak
+
+% ==============================================================================
+% SECTION 4: FEATURE SPECIFICATIONS
+% ==============================================================================
+\section{Feature Specifications}
+
+\subsection{Overview Tab Features}
+
+\subsubsection{Executive Summary Cards}
+Five metric cards displaying:
+\begin{itemize}
+    \item \textbf{Total Events} - All processed log events with invocation delta
+    \item \textbf{Errors} - Error count with percentage rate and color-coded delta
+    \item \textbf{Cold Starts} - Count with rate percentage
+    \item \textbf{Avg Duration} - Average execution time in milliseconds
+    \item \textbf{Est. Cost} - Calculated AWS Lambda cost (6 decimal precision)
+\end{itemize}
+
+\subsubsection{Health Score Gauge}
+Composite health indicator (0-100\%) calculated from:
+\begin{itemize}
+    \item Error rate (50\% weight)
+    \item Cold start rate (10\% weight)
+    \item P95 duration threshold (20\% weight)
+    \item Memory efficiency (20\% weight)
+\end{itemize}
+
+Formula: \texttt{Health = 100 - (ErrorRate * 50) - (ColdStartRate * 10) - DurationPenalty - MemoryPenalty}
+
+\subsubsection{Event Distribution Pie Chart}
+Interactive Plotly pie chart showing:
+\begin{itemize}
+    \item Report events (green - successful invocations)
+    \item Error events (red - failed invocations)
+    \item Start/End events (other colors)
+\end{itemize}
+
+\subsection{Performance Tab Features}
+
+\subsubsection{Duration Distribution Histogram}
+Plotly histogram with:
+\begin{itemize}
+    \item 30 bins for duration distribution
+    \item Average duration vertical line
+    \item Interactive hover tooltips
+    \item Export capability
+\end{itemize}
+
+\subsubsection{Memory Usage Histogram}
+Similar to duration with memory values in MB.
+
+\subsubsection{Invocation Timeline Chart}
+Time-series scatter plot showing:
+\begin{itemize}
+    \item Duration over time (line chart)
+    \item Cold start markers (star markers in red)
+    \item Interactive zoom and pan
+    \item Unified hover mode
+\end{itemize}
+
+\subsection{Cost Estimation}
+
+\subsubsection{AWS Lambda Pricing Model}
+\begin{verbatim}
+Compute Cost = TotalBilledSeconds × MemoryGB × $0.0000166667/GB-second
+Request Cost = TotalInvocations × $0.0000002/request
+Total Cost = Compute Cost + Request Cost
+\end{verbatim}
+
+Example: 256 MB, 100 invocations, 30000 ms total billed:
+\begin{itemize}
+    \item Memory GB = 0.25
+    \item Compute seconds = 30
+    \item Compute cost = 30 × 0.25 × \$0.0000166667 = \$0.000125
+    \item Request cost = 100 × \$0.0000002 = \$0.00002
+    \item \textbf{Total = \$0.000145}
+\end{itemize}
+
+\pagebreak
+
+% ==============================================================================
+% SECTION 5: DATA MODELS
+% ==============================================================================
+\section{Data Models}
+
+\subsection{ParsedEvent Class}
+\lstset{language=Python, caption=ParsedEvent Data Class}
+\begin{lstlisting}
+@dataclass
+class ParsedEvent:
+    log_group: str
+    log_stream: str
+    timestamp_ms: int
+    message: str
+    event_type: str  # "error" | "report" | "start" | "end" | "other"
+    
+    # REPORT fields
+    request_id: Optional[str] = None
+    duration_ms: Optional[float] = None
+    billed_duration_ms: Optional[float] = None
+    memory_size_mb: Optional[float] = None
+    max_memory_used_mb: Optional[float] = None
+    init_duration_ms: Optional[float] = None
+    is_cold_start: bool = False
+    
+    # Error fields
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+\end{lstlisting}
+
+\subsection{AnalysisSummary Class}
+\lstset{language=Python, caption=AnalysisSummary Data Class}
+\begin{lstlisting}
+@dataclass
+class AnalysisSummary:
+    log_groups_scanned: list[str]
+    total_events_processed: int
+    total_errors: int
+    total_invocations: int
+    cold_starts: int
+    
+    durations_ms: list[float]
+    billed_durations_ms: list[float]
+    memory_used_mb: list[float]
+    memory_sizes_mb: list[float]
+    error_events: list[ParsedEvent]
+    estimated_cost: float
+    
+    # Computed properties
+    avg_duration_ms, max_duration_ms, p95_duration_ms
+    avg_memory_mb, memory_efficiency_pct
+    cold_start_rate, error_rate
+\end{lstlisting}
+
+\pagebreak
+
+% ==============================================================================
+% SECTION 6: ERROR DETECTION PATTERNS
+% ==============================================================================
+\section{Error Detection Patterns}
+
+\subsection{Regex Patterns Used}
+
+\begin{lstlisting}[language=Python, caption=Error Detection Patterns]
+_ERROR_PATTERNS = [
+    re.compile(r"\[ERROR\]", re.IGNORECASE),
+    re.compile(r"\bERROR\b"),
+    re.compile(r"Traceback \(most recent call last\)"),
+    re.compile(r"Exception:"),
+    re.compile(r"Error:"),
+    re.compile(r"FATAL", re.IGNORECASE),
+    re.compile(r"Unhandled exception", re.IGNORECASE),
+    re.compile(r"Task timed out"),
+    re.compile(r"Runtime.ExitError"),
+    re.compile(r"OutOfMemoryError", re.IGNORECASE),
+]
+
+_EXCEPTION_TYPE_PATTERN = re.compile(
+    r"(?P<exc_type>[A-Za-z][A-Za-z0-9_]*(?:Error|Exception|Fault|Warning))"
+    r"(?::\s*(?P<exc_message>.+))?"
+)
+\end{lstlisting}
+
+\subsection{Error Classification}
+Errors are classified by:
+\begin{itemize}
+    \item Direct pattern matching (ERROR, Exception, etc.)
+    \item Exception type extraction from message
+    \item Truncation for storage (2000 char limit)
+\end{itemize}
+
+\pagebreak
+
+% ==============================================================================
+% SECTION 7: VISUALIZATION SPECIFICATIONS
+% ==============================================================================
+\section{Visualization Specifications}
+
+\subsection{Plotly Charts Configuration}
+
+\subsubsection{Duration Histogram}
+\begin{itemize}
+    \item Type: px.histogram
+    \item Bins: 30
+    \item Color: \texttt{\#4ECDC4} (teal)
+    \item Add vertical line at average
+\end{itemize}
+
+\subsubsection{Memory Histogram}
+\begin{itemize}
+    \item Type: px.histogram
+    \item Bins: 30
+    \item Color: \texttt{\#FF6B6B} (coral)
+\end{itemize}
+
+\subsubsection{Timeline Chart}
+\begin{itemize}
+    \item Type: go.Figure with go.Scatter
+    \item Mode: lines+markers
+    \item Cold starts: star markers, size 15
+    \item Hover mode: x unified
+\end{itemize}
+
+\pagebreak
+
+% ==============================================================================
+% SECTION 8: DEPLOYMENT GUIDE
+% ==============================================================================
+\section{Deployment Guide}
+
+\subsection{Local Deployment}
+
+\begin{enumerate}
+    \item Clone repository
+    \item Create virtual environment: \texttt{python -m venv .venv}
+    \item Activate: \texttt{source .venv/bin/activate}
+    \item Install: \texttt{pip install -r requirements.txt}
+    \item Run: \texttt{streamlit run app.py}
+\end{enumerate}
+
+\subsection{AWS Configuration}
+
+Required IAM permissions:
+\begin{lstlisting}[language=json, caption=IAM Policy]
+{
+    "Version": "2012-10-17",
+    "Statement": [{
+        "Effect": "Allow",
+        "Action": [
+            "logs:FilterLogEvents",
+            "logs:DescribeLogStreams",
+            "logs:DescribeLogGroups"
+        ],
+        "Resource": "*"
+    }]
+}
+\end{lstlisting}
+
+\pagebreak
+
+% ==============================================================================
+% APPENDIX
+% ==============================================================================
+\section{Appendix}
+
+\subsection{CloudWatch Log Format Examples}
+
+\bigskip
+\noindent\textbf{REPORT Line Format:}
+\begin{verbatim}
+REPORT RequestId: abc-123-def  Duration: 312.45 ms  
+Billed Duration: 313 ms  Memory Size: 512 MB  
+Max Memory Used: 128 MB  Init Duration: 234.56 ms
+\end{verbatim}
+
+\bigskip
+\noindent\textbf{START Line Format:}
+\begin{verbatim}
+START RequestId: abc-123-def  Version: $LATEST
+\end{verbatim}
+
+\bigskip
+\noindent\textbf{Error Line Examples:}
+\begin{verbatim}
+[ERROR] ValueError: invalid literal for int() with base 10: 'abc'
+Traceback (most recent call last):
+  File "lambda_function.py", line 15, handler
+    return int(value)
+ValueError: invalid literal for int()
+\end{verbatim}
+
+\subsection{Dependencies}
+\begin{itemize}
+    \item \textbf{boto3} - AWS SDK for Python
+    \item \textbf{streamlit} - Web framework
+    \item \textbf{pandas} - Data manipulation
+    \item \textbf{plotly} - Interactive charts
+    \item \textbf{reportlab} - PDF generation
+\end{itemize}
+
+\vfill
+\begin{center}
+\textbf{End of Technical Documentation}
+\end{center}
+
+\end{document}
