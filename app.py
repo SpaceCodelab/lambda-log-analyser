@@ -76,6 +76,44 @@ def run_analysis(
     return raw_events, parsed_events, summary
 
 
+def invoke_lambda_function(
+    function_name: str,
+    aws_access_key_id: str,
+    aws_secret_access_key: str,
+    aws_region: str,
+    count: int = 5,
+    delay: float = 1.0,
+) -> dict:
+    import time
+    import json as json_module
+    
+    os.environ["AWS_ACCESS_KEY_ID"] = aws_access_key_id
+    os.environ["AWS_SECRET_ACCESS_KEY"] = aws_secret_access_key
+    
+    import boto3
+    client = boto3.client('lambda', region_name=aws_region)
+    
+    results = {"success": 0, "failed": 0, "invocations": []}
+    
+    for i in range(1, count + 1):
+        try:
+            response = client.invoke(
+                FunctionName=function_name,
+                Payload=json_module.dumps({"invocation": i, "timestamp": datetime.now().isoformat()}),
+                InvocationType='RequestResponse'
+            )
+            results["success"] += 1
+            results["invocations"].append(f"✅ Invok #{i}: {response['StatusCode']}")
+        except Exception as e:
+            results["failed"] += 1
+            results["invocations"].append(f"❌ Invok #{i}: {str(e)[:50]}")
+        
+        if i < count:
+            time.sleep(delay)
+    
+    return results
+
+
 def generate_pdf(
     summary: AnalysisSummary,
     parsed_events: List[ParsedEvent],
@@ -295,81 +333,158 @@ def main():
 
     with st.sidebar:
         st.header("⚙️ Configuration")
+
+        with st.form("analysis_form", clear_on_submit=False):
+            aws_access_key_id = st.text_input(
+                "AWS Access Key ID",
+                type="password",
+                help="Your AWS access key for programmatic access",
+                placeholder="AKIA...",
+            )
+            aws_secret_access_key = st.text_input(
+                "AWS Secret Access Key",
+                type="password",
+                help="Your AWS secret access key",
+                placeholder="••••••••••••",
+            )
+            aws_region = st.selectbox("AWS Region", AWS_REGIONS, index=7)
+
+            st.divider()
+            st.subheader("📋 Analysis Settings")
+
+            log_groups_input = st.text_area(
+                "Log Group Names",
+                placeholder="/aws/lambda/my-function\n/aws/lambda/another-function",
+                help="Enter one log group per line",
+                height=100,
+            )
+            log_groups = [g.strip() for g in log_groups_input.split("\n") if g.strip()]
+
+            lookback_minutes = st.slider(
+                "Lookback Period (minutes)",
+                min_value=5,
+                max_value=1440,
+                value=60,
+                step=5,
+                help="How far back to fetch logs",
+            )
+
+            memory_size = st.number_input(
+                "Lambda Memory Size (MB)",
+                min_value=128,
+                max_value=10240,
+                value=256,
+                step=128,
+                help="Set your Lambda function memory size for accurate cost estimation",
+            )
+
+            duration_timeout = st.number_input(
+                "Lambda Timeout (seconds)",
+                min_value=1,
+                max_value=900,
+                value=30,
+                step=1,
+                help="Set your Lambda function timeout",
+            )
+
+            st.divider()
+
+            can_run = bool(aws_access_key_id and aws_secret_access_key and log_groups)
+
+            submitted = st.form_submit_button(
+                "🚀 Run Analysis",
+                type="primary",
+                use_container_width=True,
+                disabled=not can_run,
+            )
+
+            if submitted and can_run:
+                st.session_state["run_triggered"] = True
+                st.session_state["config"] = {
+                    "log_groups": log_groups,
+                    "lookback_minutes": lookback_minutes,
+                    "aws_access_key_id": aws_access_key_id,
+                    "aws_secret_access_key": aws_secret_access_key,
+                    "aws_region": aws_region,
+                    "memory_size": memory_size,
+                    "duration_timeout": duration_timeout,
+                }
+
         st.divider()
+        st.subheader("⚡ Lambda Invoker")
+        st.markdown("*Generate logs for testing*")
 
-        aws_access_key_id = st.text_input(
-            "AWS Access Key ID",
-            type="password",
-            help="Your AWS access key for programmatic access",
-        )
-        aws_secret_access_key = st.text_input(
-            "AWS Secret Access Key",
-            type="password",
-            help="Your AWS secret access key",
-        )
-        aws_region = st.selectbox("AWS Region", AWS_REGIONS, index=7)
-
-        st.divider()
-        st.subheader("📋 Analysis Settings")
-
-        log_groups_input = st.text_area(
-            "Log Group Names",
-            placeholder="/aws/lambda/my-function\n/aws/lambda/another-function",
-            help="Enter one log group per line",
-            height=100,
-        )
-        log_groups = [g.strip() for g in log_groups_input.split("\n") if g.strip()]
-
-        lookback_minutes = st.slider(
-            "Lookback Period (minutes)",
-            min_value=5,
-            max_value=1440,
-            value=60,
-            step=5,
-            help="How far back to fetch logs",
+        invoke_function_name = st.text_input(
+            "Function to Invoke",
+            value="test-lambda",
+            help="Lambda function name to invoke for testing",
         )
 
-        memory_size = st.number_input(
-            "Lambda Memory Size (MB)",
-            min_value=128,
-            max_value=10240,
-            value=128,
-            step=128,
-            help="Set your Lambda function memory size for accurate cost estimation",
-        )
-
-        duration_timeout = st.number_input(
-            "Lambda Timeout (seconds)",
+        invoke_count = st.slider(
+            "Invocations",
             min_value=1,
-            max_value=900,
-            value=30,
-            step=1,
-            help="Set your Lambda function timeout",
+            max_value=50,
+            value=10,
+            help="Number of times to invoke",
         )
 
-        st.divider()
-
-        can_run = bool(aws_access_key_id and aws_secret_access_key and log_groups)
-
-        st.button(
-            "🚀 Run Analysis",
-            type="primary",
-            use_container_width=True,
-            disabled=not can_run,
-            on_click=lambda: st.session_state.update({
-                "log_groups": log_groups,
-                "lookback_minutes": lookback_minutes,
-            }) if can_run else None,
+        invoke_delay = st.slider(
+            "Delay (seconds)",
+            min_value=0.1,
+            max_value=5.0,
+            value=0.5,
+            step=0.1,
+            help="Delay between invocations",
         )
+
+        if st.button("⚡ Invoke Lambda", use_container_width=True, disabled=not can_run):
+            with st.spinner(f"Invoking {invoke_function_name}..."):
+                try:
+                    result = invoke_lambda_function(
+                        function_name=invoke_function_name,
+                        aws_access_key_id=aws_access_key_id,
+                        aws_secret_access_key=aws_secret_access_key,
+                        aws_region=aws_region,
+                        count=invoke_count,
+                        delay=invoke_delay,
+                    )
+                    
+                    st.success(f"✅ Done! Success: {result['success']}, Failed: {result['failed']}")
+                    
+                    with st.expander("📋 Invocation Details"):
+                        for inv in result["invocations"]:
+                            st.write(inv)
+                    
+                    st.info("💡 Now click 'Run Analysis' to see the results!")
+                except Exception as e:
+                    st.error(f"❌ Error: {str(e)}")
 
     st.title("📊 Lambda Log Analyser Dashboard")
     st.markdown("Comprehensive analysis of AWS Lambda logs with performance metrics, cost estimation, and error tracking.")
 
-    if not (aws_access_key_id and aws_secret_access_key and log_groups):
-        st.info("👈 Please configure AWS credentials and log groups in the sidebar to begin analysis.")
+    if not st.session_state.get("run_triggered", False):
+        st.info("👈 Please configure AWS credentials and log groups in the sidebar, then click 'Run Analysis'.")
+        st.divider()
+        st.subheader("📋 How to Use")
+        st.markdown("""
+        1. Enter your AWS credentials
+        2. Select your AWS region  
+        3. Add CloudWatch log group names (one per line)
+        4. **(Optional)** Use "⚡ Invoke Lambda" to generate test logs
+        5. Click **Run Analysis**
+        """)
         return
 
-    if can_run:
+    config = st.session_state.get("config", {})
+    log_groups = config.get("log_groups", [])
+    lookback_minutes = config.get("lookback_minutes", 60)
+    aws_access_key_id = config.get("aws_access_key_id", "")
+    aws_secret_access_key = config.get("aws_secret_access_key", "")
+    aws_region = config.get("aws_region", "us-east-1")
+    memory_size = config.get("memory_size", 256)
+    duration_timeout = config.get("duration_timeout", 30)
+
+    if not st.session_state.get("analysis_complete", False):
         with st.spinner("Fetching and analyzing logs..."):
             try:
                 raw_events, parsed_events, summary = run_analysis(
@@ -399,6 +514,7 @@ def main():
                 st.success("✅ Analysis complete!")
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
+                st.session_state["run_triggered"] = False
                 return
 
     if st.session_state.analysis_complete:
