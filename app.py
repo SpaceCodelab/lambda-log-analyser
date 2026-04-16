@@ -334,71 +334,65 @@ def main():
     with st.sidebar:
         st.header("⚙️ Configuration")
 
-        with st.form("analysis_form", clear_on_submit=False):
-            aws_access_key_id = st.text_input(
-                "AWS Access Key ID",
-                type="password",
-                help="Your AWS access key for programmatic access",
-                placeholder="AKIA...",
-            )
-            aws_secret_access_key = st.text_input(
-                "AWS Secret Access Key",
-                type="password",
-                help="Your AWS secret access key",
-                placeholder="••••••••••••",
-            )
-            aws_region = st.selectbox("AWS Region", AWS_REGIONS, index=7)
+        aws_access_key_id = st.text_input(
+            "AWS Access Key ID",
+            type="password",
+            help="Your AWS access key for programmatic access",
+            placeholder="AKIA...",
+        )
+        aws_secret_access_key = st.text_input(
+            "AWS Secret Access Key",
+            type="password",
+            help="Your AWS secret access key",
+            placeholder="••••••••••••",
+        )
+        aws_region = st.selectbox("AWS Region", AWS_REGIONS, index=7)
 
-            st.divider()
-            st.subheader("📋 Analysis Settings")
+        st.divider()
+        st.subheader("📋 Analysis Settings")
 
-            log_groups_input = st.text_area(
-                "Log Group Names",
-                placeholder="/aws/lambda/my-function\n/aws/lambda/another-function",
-                help="Enter one log group per line",
-                height=100,
-            )
-            log_groups = [g.strip() for g in log_groups_input.split("\n") if g.strip()]
+        log_groups_input = st.text_area(
+            "Log Group Names",
+            placeholder="/aws/lambda/my-function\n/aws/lambda/another-function",
+            help="Enter one log group per line",
+            height=100,
+        )
+        log_groups = [g.strip() for g in log_groups_input.split("\n") if g.strip()]
 
-            lookback_minutes = st.slider(
-                "Lookback Period (minutes)",
-                min_value=5,
-                max_value=1440,
-                value=60,
-                step=5,
-                help="How far back to fetch logs",
-            )
+        lookback_minutes = st.slider(
+            "Lookback Period (minutes)",
+            min_value=5,
+            max_value=1440,
+            value=60,
+            step=5,
+            help="How far back to fetch logs",
+        )
 
-            memory_size = st.number_input(
-                "Lambda Memory Size (MB)",
-                min_value=128,
-                max_value=10240,
-                value=256,
-                step=128,
-                help="Set your Lambda function memory size for accurate cost estimation",
-            )
+        memory_size = st.number_input(
+            "Lambda Memory Size (MB)",
+            min_value=128,
+            max_value=10240,
+            value=256,
+            step=128,
+            help="Set your Lambda function memory size for accurate cost estimation",
+        )
 
-            duration_timeout = st.number_input(
-                "Lambda Timeout (seconds)",
-                min_value=1,
-                max_value=900,
-                value=30,
-                step=1,
-                help="Set your Lambda function timeout",
-            )
+        duration_timeout = st.number_input(
+            "Lambda Timeout (seconds)",
+            min_value=1,
+            max_value=900,
+            value=30,
+            step=1,
+            help="Set your Lambda function timeout",
+        )
 
-            st.divider()
+        st.divider()
 
-            can_run = bool(aws_access_key_id and aws_secret_access_key and log_groups)
+        can_run = bool(aws_access_key_id and aws_secret_access_key and log_groups)
 
-            submitted = st.form_submit_button(
-                "🚀 Run Analysis",
-                type="primary",
-                use_container_width=True,
-                disabled=not can_run,
-            )
-
-            if submitted and can_run:
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🚀 Run Analysis", type="primary", use_container_width=True, disabled=not can_run):
                 st.session_state["run_triggered"] = True
                 st.session_state["config"] = {
                     "log_groups": log_groups,
@@ -409,15 +403,27 @@ def main():
                     "memory_size": memory_size,
                     "duration_timeout": duration_timeout,
                 }
+        
+        with col2:
+            if st.button("⚡ Invoke Lambda", use_container_width=True, disabled=not can_run):
+                st.session_state["invoke_triggered"] = True
+                st.session_state["invoke_config"] = {
+                    "function_name": "/aws/lambda/" + (log_groups[0].split("/")[-1] if log_groups else "test-lambda"),
+                    "aws_access_key_id": aws_access_key_id,
+                    "aws_secret_access_key": aws_secret_access_key,
+                    "aws_region": aws_region,
+                    "count": 10,
+                    "delay": 0.5,
+                }
 
         st.divider()
         st.subheader("⚡ Lambda Invoker")
-        st.markdown("*Generate logs for testing*")
 
         invoke_function_name = st.text_input(
             "Function to Invoke",
             value="test-lambda",
             help="Lambda function name to invoke for testing",
+            key="invoke_fn",
         )
 
         invoke_count = st.slider(
@@ -426,6 +432,7 @@ def main():
             max_value=50,
             value=10,
             help="Number of times to invoke",
+            key="invoke_count",
         )
 
         invoke_delay = st.slider(
@@ -435,9 +442,12 @@ def main():
             value=0.5,
             step=0.1,
             help="Delay between invocations",
+            key="invoke_delay",
         )
 
-        if st.button("⚡ Invoke Lambda", use_container_width=True, disabled=not can_run):
+        if st.session_state.get("invoke_triggered", False):
+            st.session_state["invoke_triggered"] = False
+            invoke_config = st.session_state.get("invoke_config", {})
             with st.spinner(f"Invoking {invoke_function_name}..."):
                 try:
                     result = invoke_lambda_function(
