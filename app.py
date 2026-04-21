@@ -56,42 +56,119 @@ def init_session_state():
             st.session_state[key] = value
 
 
+def create_aws_session(
+    auth_mode: str,
+    aws_region: str,
+    aws_access_key_id: str = "",
+    aws_secret_access_key: str = "",
+    aws_session_token: str = "",
+    aws_profile_name: str = "",
+):
+    import boto3
+    from botocore.exceptions import ProfileNotFound
+
+    if auth_mode == "AWS CLI Profile":
+        try:
+            return boto3.session.Session(
+                profile_name=aws_profile_name or None,
+                region_name=aws_region,
+            )
+        except ProfileNotFound as exc:
+            raise RuntimeError(
+                f"AWS CLI profile '{aws_profile_name or 'default'}' was not found. "
+                "Run `aws configure --profile <name>` or choose an existing profile."
+            ) from exc
+
+    return boto3.session.Session(
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        aws_session_token=aws_session_token or None,
+        region_name=aws_region,
+    )
+
+
+def validate_aws_credentials(session) -> dict:
+    from botocore.exceptions import ClientError, BotoCoreError
+
+    try:
+        identity = session.client("sts").get_caller_identity()
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "Unknown")
+        if error_code in {"UnrecognizedClientException", "InvalidClientTokenId"}:
+            raise RuntimeError(
+                "AWS rejected these credentials. Check the access key and secret key, "
+                "or add the session token if you are using temporary credentials."
+            ) from exc
+        if error_code in {"ExpiredToken", "RequestExpired"}:
+            raise RuntimeError(
+                "These AWS temporary credentials have expired. Generate a fresh access key, "
+                "secret key, and session token."
+            ) from exc
+        if error_code in {"SignatureDoesNotMatch"}:
+            raise RuntimeError(
+                "The AWS secret key does not match the access key ID."
+            ) from exc
+        raise RuntimeError(f"AWS credential validation failed: {exc}") from exc
+    except BotoCoreError as exc:
+        raise RuntimeError(f"AWS credential validation failed: {exc}") from exc
+
+    return identity
+
+
 def run_analysis(
     log_groups: List[str],
     lookback_minutes: int,
-    aws_access_key_id: str,
-    aws_secret_access_key: str,
+    auth_mode: str,
     aws_region: str,
+    aws_access_key_id: str = "",
+    aws_secret_access_key: str = "",
+    aws_session_token: str = "",
+    aws_profile_name: str = "",
 ) -> tuple:
-    os.environ["AWS_ACCESS_KEY_ID"] = aws_access_key_id
-    os.environ["AWS_SECRET_ACCESS_KEY"] = aws_secret_access_key
+    session = create_aws_session(
+        auth_mode,
+        aws_region,
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        aws_session_token=aws_session_token,
+        aws_profile_name=aws_profile_name,
+    )
+    identity = validate_aws_credentials(session)
 
-    fetcher = LogFetcher(region=aws_region)
+    fetcher = LogFetcher(region=aws_region, session=session)
     parser = LogParser()
 
     raw_events = list(fetcher.fetch_all_groups(log_groups, lookback_minutes))
     parsed_events = [parser.parse_event(raw) for raw in raw_events]
     summary = parser.build_summary(parsed_events, log_groups)
 
-    return raw_events, parsed_events, summary
+    return raw_events, parsed_events, summary, fetcher.last_errors, identity
 
 
 def invoke_lambda_function(
     function_name: str,
-    aws_access_key_id: str,
-    aws_secret_access_key: str,
+    auth_mode: str,
     aws_region: str,
     count: int = 5,
     delay: float = 1.0,
+    aws_access_key_id: str = "",
+    aws_secret_access_key: str = "",
+    aws_session_token: str = "",
+    aws_profile_name: str = "",
 ) -> dict:
     import time
     import json as json_module
-    
-    os.environ["AWS_ACCESS_KEY_ID"] = aws_access_key_id
-    os.environ["AWS_SECRET_ACCESS_KEY"] = aws_secret_access_key
-    
-    import boto3
-    client = boto3.client('lambda', region_name=aws_region)
+
+    session = create_aws_session(
+        auth_mode,
+        aws_region,
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        aws_session_token=aws_session_token,
+        aws_profile_name=aws_profile_name,
+    )
+    validate_aws_credentials(session)
+    client = session.client('lambda', region_name=aws_region)
     
     results = {"success": 0, "failed": 0, "invocations": []}
     
@@ -334,18 +411,42 @@ def main():
     with st.sidebar:
         st.header("⚙️ Configuration")
 
-        aws_access_key_id = st.text_input(
-            "AWS Access Key ID",
-            type="password",
-            help="Your AWS access key for programmatic access",
-            placeholder="AKIA...",
+        auth_mode = st.radio(
+            "AWS Authentication",
+            options=["AWS CLI Profile", "Manual Credentials"],
+            help="Use credentials already configured with the AWS CLI, or paste keys manually.",
         )
-        aws_secret_access_key = st.text_input(
-            "AWS Secret Access Key",
-            type="password",
-            help="Your AWS secret access key",
-            placeholder="••••••••••••",
-        )
+        aws_profile_name = ""
+        aws_access_key_id = ""
+        aws_secret_access_key = ""
+        aws_session_token = ""
+
+        if auth_mode == "AWS CLI Profile":
+            aws_profile_name = st.text_input(
+                "AWS Profile Name (optional)",
+                value="default",
+                help="Uses credentials from your local AWS CLI config. Leave as 'default' unless you use another profile.",
+            ).strip()
+            st.caption("Using credentials from `~/.aws/credentials`, `~/.aws/config`, or your active AWS CLI session.")
+        else:
+            aws_access_key_id = st.text_input(
+                "AWS Access Key ID",
+                type="password",
+                help="Your AWS access key for programmatic access",
+                placeholder="AKIA...",
+            )
+            aws_secret_access_key = st.text_input(
+                "AWS Secret Access Key",
+                type="password",
+                help="Your AWS secret access key",
+                placeholder="••••••••••••",
+            )
+            aws_session_token = st.text_input(
+                "AWS Session Token (optional)",
+                type="password",
+                help="Required when using temporary AWS credentials from STS, labs, or IAM Identity Center",
+                placeholder="IQoJb3JpZ2luX2VjE...",
+            )
         aws_region = st.selectbox("AWS Region", AWS_REGIONS, index=7)
 
         st.divider()
@@ -388,84 +489,57 @@ def main():
 
         st.divider()
 
-        can_run = bool(aws_access_key_id and aws_secret_access_key and log_groups)
+        has_auth = bool(aws_profile_name) if auth_mode == "AWS CLI Profile" else bool(aws_access_key_id and aws_secret_access_key)
+        can_run = bool(has_auth and log_groups)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🚀 Run Analysis", type="primary", use_container_width=True, disabled=not can_run):
-                st.session_state["run_triggered"] = True
-                st.session_state["config"] = {
-                    "log_groups": log_groups,
-                    "lookback_minutes": lookback_minutes,
-                    "aws_access_key_id": aws_access_key_id,
-                    "aws_secret_access_key": aws_secret_access_key,
-                    "aws_region": aws_region,
-                    "memory_size": memory_size,
-                    "duration_timeout": duration_timeout,
-                }
-        
-        with col2:
-            if st.button("⚡ Invoke Lambda", use_container_width=True, disabled=not can_run):
-                st.session_state["invoke_triggered"] = True
-                st.session_state["invoke_config"] = {
-                    "function_name": "/aws/lambda/" + (log_groups[0].split("/")[-1] if log_groups else "test-lambda"),
-                    "aws_access_key_id": aws_access_key_id,
-                    "aws_secret_access_key": aws_secret_access_key,
-                    "aws_region": aws_region,
-                    "count": 10,
-                    "delay": 0.5,
-                }
+        if st.button("🚀 Run Analysis", type="primary", use_container_width=True, disabled=not can_run):
+            st.session_state["run_triggered"] = True
+            st.session_state["analysis_complete"] = False
+            st.session_state["saved_auth_mode"] = auth_mode
+            st.session_state["saved_aws_profile_name"] = aws_profile_name
+            st.session_state["saved_aws_region"] = aws_region
+            st.session_state["config"] = {
+                "auth_mode": auth_mode,
+                "log_groups": log_groups,
+                "lookback_minutes": lookback_minutes,
+                "aws_access_key_id": aws_access_key_id,
+                "aws_secret_access_key": aws_secret_access_key,
+                "aws_session_token": aws_session_token,
+                "aws_profile_name": aws_profile_name,
+                "aws_region": aws_region,
+                "memory_size": memory_size,
+                "duration_timeout": duration_timeout,
+            }
 
         st.divider()
         st.subheader("⚡ Lambda Invoker")
 
         invoke_function_name = st.text_input(
-            "Function to Invoke",
+            "Function Name",
             value="test-lambda",
-            help="Lambda function name to invoke for testing",
-            key="invoke_fn",
+            help="Lambda function name to invoke",
         )
 
-        invoke_count = st.slider(
-            "Invocations",
-            min_value=1,
-            max_value=50,
-            value=10,
-            help="Number of times to invoke",
-            key="invoke_count",
-        )
+        invoke_count = st.slider("Invocations", 1, 50, 10)
+        invoke_delay = st.slider("Delay (s)", 0.1, 5.0, 0.5, 0.1)
 
-        invoke_delay = st.slider(
-            "Delay (seconds)",
-            min_value=0.1,
-            max_value=5.0,
-            value=0.5,
-            step=0.1,
-            help="Delay between invocations",
-            key="invoke_delay",
-        )
-
-        if st.session_state.get("invoke_triggered", False):
-            st.session_state["invoke_triggered"] = False
-            invoke_config = st.session_state.get("invoke_config", {})
+        if st.button("⚡ Invoke Lambda", use_container_width=True, disabled=not can_run):
             with st.spinner(f"Invoking {invoke_function_name}..."):
                 try:
                     result = invoke_lambda_function(
                         function_name=invoke_function_name,
-                        aws_access_key_id=aws_access_key_id,
-                        aws_secret_access_key=aws_secret_access_key,
+                        auth_mode=auth_mode,
                         aws_region=aws_region,
                         count=invoke_count,
                         delay=invoke_delay,
+                        aws_access_key_id=aws_access_key_id,
+                        aws_secret_access_key=aws_secret_access_key,
+                        aws_session_token=aws_session_token,
+                        aws_profile_name=aws_profile_name,
                     )
-                    
                     st.success(f"✅ Done! Success: {result['success']}, Failed: {result['failed']}")
-                    
-                    with st.expander("📋 Invocation Details"):
-                        for inv in result["invocations"]:
-                            st.write(inv)
-                    
-                    st.info("💡 Now click 'Run Analysis' to see the results!")
+                    for inv in result["invocations"]:
+                        st.write(inv)
                 except Exception as e:
                     st.error(f"❌ Error: {str(e)}")
 
@@ -486,10 +560,13 @@ def main():
         return
 
     config = st.session_state.get("config", {})
+    auth_mode = config.get("auth_mode", "AWS CLI Profile")
     log_groups = config.get("log_groups", [])
     lookback_minutes = config.get("lookback_minutes", 60)
     aws_access_key_id = config.get("aws_access_key_id", "")
     aws_secret_access_key = config.get("aws_secret_access_key", "")
+    aws_session_token = config.get("aws_session_token", "")
+    aws_profile_name = config.get("aws_profile_name", "default")
     aws_region = config.get("aws_region", "us-east-1")
     memory_size = config.get("memory_size", 256)
     duration_timeout = config.get("duration_timeout", 30)
@@ -497,13 +574,22 @@ def main():
     if not st.session_state.get("analysis_complete", False):
         with st.spinner("Fetching and analyzing logs..."):
             try:
-                raw_events, parsed_events, summary = run_analysis(
+                raw_events, parsed_events, summary, fetch_errors, caller_identity = run_analysis(
                     log_groups,
                     lookback_minutes,
-                    aws_access_key_id,
-                    aws_secret_access_key,
+                    auth_mode,
                     aws_region,
+                    aws_access_key_id=aws_access_key_id,
+                    aws_secret_access_key=aws_secret_access_key,
+                    aws_session_token=aws_session_token,
+                    aws_profile_name=aws_profile_name,
                 )
+
+                if fetch_errors and not raw_events:
+                    raise RuntimeError(
+                        "CloudWatch log fetch failed for all selected log groups:\n- "
+                        + "\n- ".join(fetch_errors)
+                    )
 
                 if parsed_events:
                     summary.estimated_cost = calculate_cost(
@@ -517,6 +603,8 @@ def main():
                     "summary": summary,
                     "parsed_events": parsed_events,
                     "raw_events": raw_events,
+                    "fetch_errors": fetch_errors,
+                    "caller_identity": caller_identity,
                     "log_groups": log_groups,
                     "lookback_minutes": lookback_minutes,
                     "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -530,6 +618,25 @@ def main():
     if st.session_state.analysis_complete:
         summary = st.session_state.summary
         parsed_events = st.session_state.parsed_events
+        fetch_errors = st.session_state.get("fetch_errors", [])
+        caller_identity = st.session_state.get("caller_identity")
+
+        if caller_identity:
+            st.caption(
+                "AWS identity: "
+                f"{caller_identity.get('Arn', 'unknown')} "
+                f"(account {caller_identity.get('Account', 'unknown')})"
+            )
+
+        if fetch_errors:
+            st.warning(
+                "Some log groups could not be read:\n- " + "\n- ".join(fetch_errors)
+            )
+        if not st.session_state.raw_events:
+            st.info(
+                "No CloudWatch log events were found in the selected lookback window. "
+                "Check the AWS region, the exact log group name, and whether your credentials need a session token."
+            )
 
         tab1, tab2, tab3, tab4, tab5 = st.tabs([
             "📈 Overview",

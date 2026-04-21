@@ -6,10 +6,10 @@ Handles pagination automatically.
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Generator
+from typing import Generator, Optional
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from config import config
 
@@ -22,8 +22,15 @@ class LogFetcher:
     Iterates over every log stream in each requested log group.
     """
 
-    def __init__(self, region: str = config.AWS_REGION) -> None:
-        self._client = boto3.client("logs", region_name=region)
+    def __init__(
+        self,
+        region: str = config.AWS_REGION,
+        session: Optional[boto3.session.Session] = None,
+    ) -> None:
+        self._client = (session or boto3.session.Session()).client(
+            "logs", region_name=region
+        )
+        self.last_errors: list[str] = []
 
     # ── Public API ────────────────────────────────────────────────
 
@@ -48,13 +55,7 @@ class LogFetcher:
             "Fetching logs from '%s' | window=%d min", log_group_name, lookback_minutes
         )
 
-        streams = list(self._list_streams(log_group_name, start_ms))
-        logger.info("Found %d active stream(s) in '%s'", len(streams), log_group_name)
-
-        for stream_name in streams:
-            yield from self._fetch_stream_events(
-                log_group_name, stream_name, start_ms, end_ms
-            )
+        yield from self._filter_group_events(log_group_name, start_ms, end_ms)
 
     def fetch_all_groups(
         self,
@@ -63,13 +64,14 @@ class LogFetcher:
     ) -> Generator[dict, None, None]:
         """Convenience wrapper — iterate over multiple log groups."""
         groups = log_group_names or config.LOG_GROUP_NAMES
+        self.last_errors = []
         for group in groups:
             try:
                 yield from self.fetch_events(group, lookback_minutes)
-            except ClientError as exc:
-                logger.error(
-                    "Failed to fetch logs from '%s': %s", group, exc, exc_info=True
-                )
+            except (ClientError, BotoCoreError) as exc:
+                message = f"{group}: {exc}"
+                self.last_errors.append(message)
+                logger.error("Failed to fetch logs from '%s': %s", group, exc, exc_info=True)
 
     # ── Private helpers ───────────────────────────────────────────
 
@@ -79,68 +81,36 @@ class LogFetcher:
         start = now - timedelta(minutes=lookback_minutes)
         return int(start.timestamp() * 1000), int(now.timestamp() * 1000)
 
-    def _list_streams(
-        self, log_group_name: str, start_ms: int
-    ) -> Generator[str, None, None]:
-        """Yield stream names that have had activity since *start_ms*."""
-        paginator = self._client.get_paginator("describe_log_streams")
-        pages = paginator.paginate(
-            logGroupName=log_group_name,
-            orderBy="LastEventTime",
-            descending=True,
-        )
-        try:
-            for page in pages:
-                for stream in page.get("logStreams", []):
-                    last_event = stream.get("lastEventTimestamp", 0)
-                    if last_event < start_ms:
-                        # Streams are ordered descending — stop early
-                        return
-                    yield stream["logStreamName"]
-        except ClientError as exc:
-            logger.error(
-                "Could not list streams for '%s': %s", log_group_name, exc
-            )
-
-    def _fetch_stream_events(
+    def _filter_group_events(
         self,
         log_group_name: str,
-        stream_name: str,
         start_ms: int,
         end_ms: int,
     ) -> Generator[dict, None, None]:
-        """Yield all events from a single log stream within the time window."""
+        """Yield all events from a log group within the time window."""
         kwargs: dict = {
             "logGroupName": log_group_name,
-            "logStreamName": stream_name,
             "startTime": start_ms,
             "endTime": end_ms,
-            "startFromHead": True,
+            "interleaved": True,
         }
         while True:
             try:
-                response = self._client.get_log_events(**kwargs)
+                response = self._client.filter_log_events(**kwargs)
             except ClientError as exc:
-                logger.warning(
-                    "Error reading stream '%s/%s': %s",
-                    log_group_name,
-                    stream_name,
-                    exc,
-                )
-                break
+                logger.warning("Error reading group '%s': %s", log_group_name, exc)
+                raise
 
             for event in response.get("events", []):
                 yield {
                     "log_group": log_group_name,
-                    "log_stream": stream_name,
+                    "log_stream": event.get("logStreamName", ""),
                     "timestamp": event["timestamp"],
                     "message": event.get("message", ""),
                 }
 
-            # CloudWatch uses forward/backward tokens for pagination
-            next_token = response.get("nextForwardToken")
+            next_token = response.get("nextToken")
             prev_token = kwargs.get("nextToken")
-            if next_token == prev_token:
-                # No more pages
+            if not next_token or next_token == prev_token:
                 break
             kwargs["nextToken"] = next_token
